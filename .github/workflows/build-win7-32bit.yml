@@ -1,0 +1,116 @@
+name: Build backend for Windows 7 32-bit
+
+# Builds the `backend` (soxy.dll / soxy.exe) for `i686-win7-windows-gnu`.
+#
+# `i686-win7-windows-gnu` is a Tier 3 target: rustup does not ship a standard
+# library for it, so a dedicated rustc has to be built from sources (see the
+# `win7-rustc` directory and the `make win7-32bit` target). The resulting
+# compiler is cached between runs to keep the job reasonably fast.
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Space separated list of services to embed'
+        required: false
+        default: 'clipboard command forward ftp input socks5 stage0'
+      vc:
+        description: 'Space separated list of virtual channels to support'
+        required: false
+        default: 'dvc svc'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SUFFIX: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+  # Target triple of the produced artifacts.
+  TARGET: i686-win7-windows-gnu
+
+jobs:
+  build-win7-32bit:
+    name: Build backend (i686-win7-windows-gnu)
+    runs-on: ubuntu-latest
+    # Rebuilding rustc from sources is long, the 6 hours job limit applies.
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Dependencies
+        run: |
+          sudo apt update
+          sudo apt full-upgrade
+          sudo apt install gcc-multilib libc-dev clang mingw-w64
+
+      - name: Rustup update
+        run: rustup update
+
+      - name: Check the 32 bits MinGW cross-compiler
+        run: i686-w64-mingw32-gcc --version
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      # `make win7-32bit` needs to know the name of the toolchain to register
+      # in rustup and where its stage2 (i.e. the compiler itself) lives.
+      - name: Add win7 toolchain env vars
+        run: |
+          {
+            # Gotcha: if any overrides are used below in the call to
+            # `make win7-32bit`, they need to be reflected here as well.
+            make --no-print-directory print-TOOLCHAIN_WIN7_BACKEND
+            make --no-print-directory print-TARGETS_WIN7_32BIT_BACKEND
+            make --no-print-directory -C win7-rustc print-RUST_STAGE2_DIR
+          } >> $GITHUB_ENV
+
+      # Cache action to avoid rebuilding the compiler on every run.
+      # The target is part of the key: a compiler built for
+      # `x86_64-win7-windows-gnu` only does not ship the i686 `std`.
+      - name: Cache Win7 rustc
+        id: win7-rustc
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.RUST_STAGE2_DIR }}
+          key: |
+            ${{ runner.os }}-rust-toolchain-${{ env.TOOLCHAIN_WIN7_BACKEND }}-${{ env.TARGETS_WIN7_32BIT_BACKEND }}
+
+      # If the cache was hit, register the cached compiler with rustup
+      - name: Register cached toolchain
+        if: ${{ steps.win7-rustc.outputs.cache-hit == 'true' }}
+        run: |
+          make -C win7-rustc register-toolchain \
+            TOOLCHAIN=${{ env.TOOLCHAIN_WIN7_BACKEND }}
+
+      - name: Build Win7 32-bit backend
+        run: |
+          make win7-32bit \
+            SERVICES="${{ inputs.services || 'clipboard command forward ftp input socks5 stage0' }}" \
+            VC="${{ inputs.vc || 'dvc svc' }}"
+
+      - name: Gather artifacts
+        run: |
+          mkdir -p artifacts/release/backend
+          cp -R release/backend/${{ env.TARGET }} artifacts/release/backend/
+          ( cd artifacts && find . -type f ! -name SHA256SUMS.txt -print0 \
+              | sort -z | xargs -0 sha256sum > SHA256SUMS.txt )
+          cat artifacts/SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: win7-32bit-${{ env.SUFFIX }}
+          path: artifacts
+          retention-days: 90
+          if-no-files-found: error

@@ -106,6 +106,17 @@ impl fmt::Display for Error {
     }
 }
 
+// Citrix ships one "Window Flow" API library per architecture: `wfapi64.dll`
+// for 64 bits processes and `wfapi32.dll` for 32 bits ones. A 32 bits process
+// cannot load the 64 bits library (and a pure 32 bits Windows 7 only provides
+// `wfapi32.dll`), so the name matching the target pointer width is tried
+// first. The other one is kept as a fallback.
+#[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+const CITRIX_LIBRARIES: &[&str] = &["wfapi64", "wfapi32"];
+
+#[cfg(all(target_os = "windows", target_pointer_width = "32"))]
+const CITRIX_LIBRARIES: &[&str] = &["wfapi32", "wfapi64"];
+
 pub struct Libraries {
     #[cfg(all(feature = "svc", target_os = "windows"))]
     vdp_rdpvcbridge: Option<libloading::Library>,
@@ -140,7 +151,9 @@ impl Libraries {
         unsafe {
             common::trace!("trying to load Citrix library");
             #[cfg(target_os = "windows")]
-            let citrix = libloading::Library::new(libloading::library_filename("wfapi64")).ok();
+            let citrix = CITRIX_LIBRARIES
+                .iter()
+                .find_map(|name| libloading::Library::new(libloading::library_filename(name)).ok());
             #[cfg(not(target_os = "windows"))]
             let citrix = libloading::Library::new(libloading::library_filename("winsta")).ok();
 

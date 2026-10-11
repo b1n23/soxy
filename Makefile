@@ -6,6 +6,7 @@ TARGETS_FRONTEND ?= i686-pc-windows-gnu x86_64-pc-windows-gnu i686-unknown-linux
 TARGETS_BACKEND ?= i686-pc-windows-gnu x86_64-pc-windows-gnu i686-unknown-linux-gnu x86_64-unknown-linux-gnu
 TARGETS_STANDALONE ?= i686-pc-windows-gnu x86_64-pc-windows-gnu i686-unknown-linux-gnu x86_64-unknown-linux-gnu
 TARGETS_WIN7_BACKEND ?= x86_64-win7-windows-gnu
+TARGETS_WIN7_32BIT_BACKEND ?= i686-win7-windows-gnu
 TARGETS_SOXYREG ?= i686-pc-windows-gnu x86_64-pc-windows-gnu
 
 RELEASE_DIR := release
@@ -133,6 +134,11 @@ win7: build-win7
 			fi ; \
 		done ; \
 	done
+
+# Same as `win7` but restricted to the 32 bits (i686) Windows 7 backend.
+.PHONY: win7-32bit
+win7-32bit:
+	$(MAKE) win7 TARGETS_WIN7_BACKEND="$(TARGETS_WIN7_32BIT_BACKEND)"
 
 .PHONY: distclean
 distclean: clean
