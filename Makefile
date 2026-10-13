@@ -2,6 +2,10 @@ SERVICES ?= clipboard command forward ftp input socks5 stage0
 
 VC ?= dvc svc
 
+# Set to 1 to also export the Sangfor VDI client plugin entry points
+# (svc_plugin_init / dvc_plugin_init) from the frontend library.
+SANGFOR ?= 0
+
 TARGETS_FRONTEND ?= i686-pc-windows-gnu x86_64-pc-windows-gnu i686-unknown-linux-gnu x86_64-unknown-linux-gnu
 TARGETS_BACKEND ?= i686-pc-windows-gnu x86_64-pc-windows-gnu i686-unknown-linux-gnu x86_64-unknown-linux-gnu
 TARGETS_STANDALONE ?= i686-pc-windows-gnu x86_64-pc-windows-gnu i686-unknown-linux-gnu x86_64-unknown-linux-gnu
@@ -156,11 +160,21 @@ FEATURES_VC := $(strip $(VC))
 FEATURES_VC := $(shell echo "$(FEATURES_VC)" | sed 's/ /,/g')
 FEATURES_VC := "$(FEATURES_VC)"
 
+# Feature list of the frontend libraries, including the optional Sangfor VDI
+# client plugin entry points.
+FEATURES_FRONTEND := log,$(FEATURES_VC),$(FEATURES_SERVICES)
+# Same as above, without the logging feature (used by clippy).
+FEATURES_FRONTEND_CHECK := $(FEATURES_VC),$(FEATURES_SERVICES)
+ifeq ($(SANGFOR),1)
+FEATURES_FRONTEND := $(FEATURES_FRONTEND),sangfor
+FEATURES_FRONTEND_CHECK := $(FEATURES_FRONTEND_CHECK),sangfor
+endif
+
 .PHONY: build-release
 build-release:
 	@for t in $(TARGETS_FRONTEND) ; do \
 		echo ; echo "# Building release frontend ($(VC)) ($(SERVICES)) for $$t with $(TOOLCHAIN_FRONTEND_RELEASE)" ; echo ; \
-		(cd frontend && cargo +$(TOOLCHAIN_FRONTEND_RELEASE) build --release --features log,$(FEATURES_VC),$(FEATURES_SERVICES) --target $$t && cd ..) || exit 1 ; \
+		(cd frontend && cargo +$(TOOLCHAIN_FRONTEND_RELEASE) build --release --features $(FEATURES_FRONTEND) --target $$t && cd ..) || exit 1 ; \
 	done
 	@for t in $(TARGETS_BACKEND) ; do \
 		echo ; echo "# Building release backend ($(VC)) ($(SERVICES)) for $$t with $(TOOLCHAIN_BACKEND_RELEASE)" ; echo ; \
@@ -179,7 +193,7 @@ build-release:
 build-debug:
 	@for t in $(TARGETS_FRONTEND) ; do \
 		echo ; echo "# Building debug frontend ($(VC)) ($(SERVICES)) for $$t with $(TOOLCHAIN_FRONTEND_DEBUG)" ; echo ; \
-		(cd frontend && cargo +$(TOOLCHAIN_FRONTEND_DEBUG) build --features log,$(FEATURES_VC),$(FEATURES_SERVICES) --target $$t && cd ..) || exit 1 ; \
+		(cd frontend && cargo +$(TOOLCHAIN_FRONTEND_DEBUG) build --features $(FEATURES_FRONTEND) --target $$t && cd ..) || exit 1 ; \
 	done
 	@for t in $(TARGETS_BACKEND) ; do \
 		echo ; echo "# Building debug backend ($(VC)) ($(SERVICES)) for $$t with $(TOOLCHAIN_BACKEND_DEBUG)" ; echo ; \
@@ -236,7 +250,7 @@ check clippy:
 	@for t in $(TARGETS_FRONTEND) ; do \
 		echo ; echo "# Clippy on frontend for $$t with $(TOOLCHAIN_FRONTEND_DEBUG)" ; echo ; \
 		(cd common && cargo +$(TOOLCHAIN_FRONTEND_DEBUG) $@ --features frontend,log,$(FEATURES_SERVICES) --target $$t && cd ..) || exit 1 ; \
-		(cd frontend && cargo +$(TOOLCHAIN_FRONTEND_DEBUG) $@ --features $(FEATURES_VC),$(FEATURES_SERVICES) --target $$t && cd ..) || exit 1 ; \
+		(cd frontend && cargo +$(TOOLCHAIN_FRONTEND_DEBUG) $@ --features $(FEATURES_FRONTEND_CHECK) --target $$t && cd ..) || exit 1 ; \
 	done
 	@for t in $(TARGETS_BACKEND) ; do \
 		echo ; echo "# Clippy on backend for $$t with $(TOOLCHAIN_BACKEND_DEBUG)" ; echo ; \

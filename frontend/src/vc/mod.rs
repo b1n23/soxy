@@ -4,6 +4,8 @@ use std::fmt;
 
 #[cfg(feature = "dvc")]
 mod dvc;
+#[cfg(feature = "sangfor")]
+mod sangfor;
 #[cfg(feature = "svc")]
 mod svc;
 

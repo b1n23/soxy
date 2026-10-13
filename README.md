@@ -34,6 +34,12 @@ as [SocksOverRDP](https://github.com/nccgroup/SocksOverRDP),
 soxy supports native Windows RDP (real or virtual host) as well as VMware
 Horizon, Citrix virtual machines and XRDP.
 
+Sangfor VDI clients are supported too, but with two caveats: their RDP channel
+plugins are listed in a hardcoded table inside the client binaries, so the
+registration step patches one entry of that table on disk, and the client
+verifies the Authenticode signature of the files it loads (see
+[Sangfor VDI](#sangfor-vdi)).
+
 On the client side, soxy works as a plugin on:
 
 - VMware Horizon client on Linux, macOS and Windows;
@@ -58,6 +64,7 @@ code (even log message strings are absent from the binary) and without symbols.
   - [Backend Installation](#-backend-installation)
 - [Usage](#-usage)
 - [Troubleshooting](#-troubleshooting)
+- [Sangfor VDI](#sangfor-vdi)
 - [Contributing](#-contributing)
 - [License](#-license)
 
@@ -138,6 +145,17 @@ variable at the beginning of the `Makefile`.
 ```Makefile
 SERVICES ?= clipboard command forward ftp input socks5 stage0
 ```
+
+By default the frontend does not export the Sangfor VDI client plugin entry
+points. They can be enabled by editing the `SANGFOR` variable at the beginning
+of the `Makefile`:
+
+```Makefile
+SANGFOR ?= 1
+```
+
+These entry points only probe the ABI of the Sangfor VDI client; they do not
+provide a working channel yet (see [Sangfor VDI](#sangfor-vdi)).
 
 ##### Make Targets
 
@@ -402,6 +420,26 @@ i686-pc-windows-gnu\soxyreg.exe dvc unregister
 Be careful, **only Static Virtual Channels** are supported by the Citrix
 Linux VDA.
 
+#### For Sangfor VDI client
+
+The Sangfor VDI client has no registry key and no configuration file to declare
+an additional RDP virtual channel plugin: the list of channel plugin DLLs is
+hardcoded, as NUL terminated strings, inside its own binaries. `soxyreg` therefore
+patches one entry of that table on disk. Note that the client verifies the
+Authenticode signature of the files it loads, so the patched binaries must be
+restored with `soxyreg sangfor unregister` afterwards; see
+[Sangfor VDI](#sangfor-vdi) for the details and the limitations.
+
+```bash
+soxyreg.exe sangfor register soxy.dll
+```
+
+The **32 bits** version of `soxy.dll` (from `i686-pc-windows-gnu`) must be used,
+as the Sangfor VDI client is a 32 bits application. Administrator privileges are
+required, and the client must be restarted afterward.
+
+> 中文说明见[Sangfor VDI](#sangfor-vdi)一节。
+
 #### Configuration file
 
 When the `frontend` of soxy starts, it will look for a configuration
@@ -641,6 +679,184 @@ working. In this case, please have a look at XRDP logs (`journalctl -u
 xdrp.service`) to see if there is a message like `Received a message
 for the disabled channel`. If this is the case, you need to whitelist
 the `SOXY` channel as described above.
+
+## Sangfor VDI
+
+### How it works
+
+Contrary to VMware Horizon, FreeRDP, Remmina, Citrix and the Microsoft RDP
+client, the Sangfor VDI client (`SangforCSClient.exe` and friends) exposes no
+registry key and no configuration file to declare an additional RDP virtual
+channel plugin. The list of channel plugin DLLs is hardcoded, as NUL terminated
+strings, inside its own binaries. For instance `RVLSession.exe` contains:
+
+```
+librvldr.dll | librdpclip.dll | librdpsnd.dll | libusbtray.dll |
+librvlclip.dll | librvlmmr.dll | librvldisk.dll | librvlpar.dll |
+librdpgfx.dll | rvlprinter.dll
+```
+
+together with the directory `%ProgramFiles%\Sangfor\VDI\RemoteAppClient\` and the
+name of the entry point to resolve, `dvc_plugin_init`.
+
+`soxyreg sangfor` works around this by overwriting one entry of that table with
+the file name of the soxy frontend DLL. Only the bytes of the selected string
+are modified: the replacement is never longer than the original one and the
+remaining bytes are filled with NULs, so no pointer, offset or relocation is
+touched. A byte exact backup (`<file>.soxy.bak`) of every modified binary is kept
+next to it, and `soxyreg sangfor unregister` restores it.
+
+```bash
+# report the current state
+soxyreg.exe sangfor status
+
+# register the frontend DLL (copies it into the client directory and patches
+# the hardcoded plugin table)
+soxyreg.exe sangfor register soxy.dll
+
+# same, but choose which plugin entry is replaced and change nothing
+soxyreg.exe sangfor register soxy.dll --victim librvldr.dll --dry-run
+
+# restore the original binaries
+soxyreg.exe sangfor unregister
+```
+
+By default the least useful plugin of each binary is replaced
+(`rvlprinter.dll` in `RVLSession.exe`, `librdpsnd.dll` in `libsrapc*.dll`);
+`--victim` allows to pick another one.
+
+### Plugin entry point
+
+The entry points are named `svc_plugin_init` (static virtual channels) and
+`dvc_plugin_init` (dynamic virtual channels), not the `FreeRDP` standard
+`VirtualChannelEntry` / `DVCPluginEntry`.
+
+Their signature has been confirmed by disassembling the channel dispatcher of
+`libngs2.dll` (the `FreeRDP` fork embedded in the client), at `0x10005b90` of
+the 5.5.3 build:
+
+```
+0x10005bab  push ebx        ; argument 4
+0x10005bac  push ecx        ; argument 3
+0x10005bad  push esi        ; argument 2
+0x10005bae  push edi        ; argument 1
+0x10005baf  call eax        ; the entry point
+0x10005bb1  add esp, 0x10   ; the caller cleans 16 bytes, hence cdecl
+0x10005bb4  test eax, eax   ; the 32 bits return value is checked
+```
+
+The two first arguments are checked against null by the plugins shipped with the
+client, and the second one is a structure whose `+4` field points to a
+descriptor whose first `DWORD` is the channel type (`2` for a static virtual
+channel, `5` and `9` for dynamic ones). The third and fourth arguments are
+forwarded by the dispatcher but unused by the plugins of the client, so their
+meaning remains unknown.
+
+The `sangfor` feature of the `frontend` crate (`make SANGFOR=1`) exports both
+entry points with this signature. They still only probe the ABI: they dump their
+arguments to `%TEMP%\soxy-sangfor-probe.log` and return a failure status. One
+connection with such a build is enough to check the above against a live client
+and to recover the meaning of the arguments.
+
+### Limitations
+
+- **Only the 32 bits client is handled**, and only the binaries shipped in
+  `RemoteAppClient`.
+- **The client verifies the Authenticode signature of the files it loads.**
+  Every Sangfor binary which loads another module imports `WinVerifyTrustEx`,
+  `CryptQueryObject`, `CryptCreateHash` and `CreateToolhelp32Snapshot`, and
+  contains the strings *"Loading failed. Please check if the signature of file
+  (%s) is valid."*. `RVLSession.exe`, `SfRemoteAppClient.exe`,
+  `SangforGNavBar.exe`, `libsrapc.dll`, `libsrapc2.dll` and `SangforCSClient.exe`
+  all do. Whether the check is enforced or only reported to the user has not
+  been determined yet, but a patched binary does break its signature:
+  `soxyreg sangfor unregister` restores it.
+- The patched plugin feature (e.g. virtual printing) is lost for as long as
+  soxy is registered.
+
+### 中文说明
+
+#### 为什么需要特殊处理
+
+和 VMware Horizon、FreeRDP、Remmina、Citrix 以及微软 RDP 客户端不同，深信服
+VDI 客户端（`SangforCSClient.exe` 等）**没有提供任何注册表项或配置文件**来注册
+额外的 RDP 虚拟通道插件。通道插件 DLL 的清单是以 NUL 结尾字符串的形式**硬编码**
+在客户端自己的二进制文件里的。例如 `RVLSession.exe` 中包含：
+
+```
+librvldr.dll | librdpclip.dll | librdpsnd.dll | libusbtray.dll |
+librvlclip.dll | librvlmmr.dll | librvldisk.dll | librvlpar.dll |
+librdpgfx.dll | rvlprinter.dll
+```
+
+同时还硬编码了插件所在目录 `%ProgramFiles%\Sangfor\VDI\RemoteAppClient\`
+以及要解析的入口点名 `dvc_plugin_init`。
+
+#### 实现方式
+
+`soxyreg sangfor` 的做法是把这张表里的某一项直接改写成 soxy 前端 DLL 的文件名。
+只覆盖该字符串本身的字节：替换串不会比原串更长，不足部分用 NUL 填充，因此
+**不会改动任何指针、偏移或重定位信息**。每个被修改的文件都会在旁边保留一份逐字节
+一致的备份（`<文件名>.soxy.bak`），`soxyreg sangfor unregister` 负责还原。
+
+```bash
+# 查看当前注册状态
+soxyreg.exe sangfor status
+
+# 注册前端 DLL（会把它复制到客户端目录，并改写硬编码插件表）
+soxyreg.exe sangfor register soxy.dll
+
+# 同上，但指定替换哪一项，并且不做任何修改
+soxyreg.exe sangfor register soxy.dll --victim librvldr.dll --dry-run
+
+# 还原原始二进制文件
+soxyreg.exe sangfor unregister
+```
+
+默认会替换每个二进制里“最不常用”的插件（`RVLSession.exe` 中是
+`rvlprinter.dll`，`libsrapc*.dll` 中是 `librdpsnd.dll`）；用 `--victim` 可以
+换成其他插件。
+
+#### 插件入口
+
+入口名不是 FreeRDP 标准的 `VirtualChannelEntry` / `DVCPluginEntry`，而是
+`svc_plugin_init`（静态虚拟通道）和 `dvc_plugin_init`（动态虚拟通道）。
+
+函数原型已通过反汇编客户端内置的 FreeRDP 分支 `libngs2.dll` 的通道分发器确认
+（5.5.3 版本中位于 `0x10005b90`）：
+
+```
+0x10005bab  push ebx        ; 第 4 个参数
+0x10005bac  push ecx        ; 第 3 个参数
+0x10005bad  push esi        ; 第 2 个参数
+0x10005bae  push edi        ; 第 1 个参数
+0x10005baf  call eax        ; 入口点
+0x10005bb1  add esp, 0x10   ; 调用方自行清理 16 字节，即 cdecl
+0x10005bb4  test eax, eax   ; 检查 32 位返回值
+```
+
+客户端自带的插件会检查前两个参数是否为空；第二个参数是一个结构体，其 `+4`
+字段指向一个描述符，描述符的第一个 `DWORD` 是通道类型（静态虚拟通道为 `2`，
+动态虚拟通道为 `5` 和 `9`）。第三、第四个参数会被分发器原样透传，但客户端插件
+并未使用，含义仍未知。
+
+前端可通过 `make SANGFOR=1` 构建出按此原型导出的版本。它目前仍是探针：把参数
+dump 到 `%TEMP%\soxy-sangfor-probe.log` 并返回失败。用这个版本连接一次，即可在
+真实客户端上验证上述结论并弄清各参数的含义。
+
+#### 使用前提与限制
+
+- 只处理 **32 位**客户端，且只处理 `RemoteAppClient` 目录下随客户端分发的那些
+  二进制文件。
+- **客户端会校验它加载的文件 Authenticode 签名。** 所有会加载其他模块的深信服
+  二进制都导入了 `WinVerifyTrustEx`、`CryptQueryObject`、`CryptCreateHash` 和
+  `CreateToolhelp32Snapshot`，并包含 *"Loading failed. Please check if the
+  signature of file (%s) is valid."* 字符串；`RVLSession.exe`、
+  `SfRemoteAppClient.exe`、`SangforGNavBar.exe`、`libsrapc.dll`、
+  `libsrapc2.dll` 和 `SangforCSClient.exe` 均有。该校验是强制拒绝还是仅提示用户
+  尚未确定，但被改写的文件签名确实已失效——用
+  `soxyreg sangfor unregister` 还原即可。
+- 在 soxy 注册期间，被替换掉的那个插件功能（例如虚拟打印）会失效。
 
 ## 🚧 Contributing
 

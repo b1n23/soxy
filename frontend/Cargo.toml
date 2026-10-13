@@ -60,3 +60,6 @@ service-socks5 = [ "common/service-socks5" ]
 service-stage0 = [ "common/service-stage0" ]
 dvc = [ "dep:soxyreg", "dep:windows-core" ]
 svc = [ ]
+# Exports the Sangfor VDI client plugin entry points (see vc/sangfor.rs). They
+# only probe the ABI: they log the argument they receive and return a failure.
+sangfor = [ ]

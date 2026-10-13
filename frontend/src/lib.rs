@@ -8,7 +8,7 @@ mod client;
 mod config;
 #[cfg(any(feature = "dvc", feature = "svc"))]
 mod control;
-#[cfg(any(feature = "dvc", feature = "svc"))]
+#[cfg(any(feature = "dvc", feature = "svc", feature = "sangfor"))]
 mod vc;
 
 enum Error {

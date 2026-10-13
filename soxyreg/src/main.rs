@@ -2,6 +2,7 @@ use clap::Parser;
 use std::{env, path};
 
 mod dvc;
+mod sangfor;
 mod svc;
 
 #[derive(Parser)]
@@ -17,76 +18,105 @@ struct Args {
 enum Mode {
     Dvc,
     Svc,
+    /// Sangfor VDI client: the hardcoded channel plugin list is patched on disk.
+    Sangfor,
 }
 
 #[derive(clap::Subcommand)]
 enum Operation {
-    Register { dll: String },
-    Unregister,
+    Register {
+        dll: String,
+        /// Sangfor mode only: hardcoded channel plugin entry to replace.
+        #[arg(long)]
+        victim: Option<String>,
+        /// Sangfor mode only: report actions without modifying any file.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Unregister {
+        /// Sangfor mode only: report actions without modifying any file.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Sangfor mode only: report the current state of the registration.
+    Status,
+}
+
+fn dll_path(dll: &str) -> Result<String, String> {
+    let path = path::Path::new(dll);
+
+    if !path.exists() {
+        return Err("invalid DLL path".into());
+    }
+
+    if !path.is_file() {
+        return Err("given path is not a file".into());
+    }
+
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let curdir = env::current_dir().map_err(|e| format!("invalid current dir: {e}"))?;
+        curdir.join(path)
+    };
+
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| "DLL path is not valid UTF-8".into())
 }
 
 fn main() {
     let args = Args::parse();
 
-    match (args.operation, args.mode) {
-        (Operation::Register { dll }, Mode::Dvc) => {
-            let path = path::Path::new(&dll);
+    if matches!(args.mode, Mode::Sangfor) {
+        match args.operation {
+            Operation::Register {
+                dll,
+                victim,
+                dry_run,
+            } => sangfor::register(&dll, victim.as_deref(), dry_run),
+            Operation::Unregister { dry_run } => sangfor::unregister(dry_run),
+            Operation::Status => sangfor::status(),
+        }
 
-            if !path.exists() {
-                eprintln!("invalid DLL path");
-                return;
-            }
+        return;
+    }
 
-            if !path.is_file() {
-                eprintln!("given path is not a file");
-                return;
-            }
-
-            let path = if path.is_absolute() {
-                path::PathBuf::from(path)
-            } else {
-                let curdir = env::current_dir().expect("invalid current dir");
-                curdir.join(path)
+    match args.operation {
+        Operation::Register { dll, .. } => {
+            let path = match dll_path(&dll) {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return;
+                }
             };
-
-            let path = path.as_os_str().to_str().unwrap();
 
             println!("DLL path = {path}");
 
-            dvc::register(path);
-        }
-        (Operation::Unregister, Mode::Dvc) => dvc::unregister(),
-        (Operation::Register { dll }, Mode::Svc) => {
-            let path = path::Path::new(&dll);
+            let file_name = path::Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
 
-            if !path.exists() {
-                eprintln!("invalid DLL path");
-                return;
+            match args.mode {
+                Mode::Dvc => dvc::register(&path),
+                Mode::Svc => {
+                    println!(
+                        "Do not forget to put {file_name} in C:\\Program Files (x86)\\Citrix\\ICA Client\\ !!!!!!"
+                    );
+                    svc::register(&path, file_name);
+                }
+                Mode::Sangfor => unreachable!(),
             }
-
-            if !path.is_file() {
-                eprintln!("given path is not a file");
-                return;
-            }
-
-            let path = if path.is_absolute() {
-                path::PathBuf::from(path)
-            } else {
-                let curdir = env::current_dir().expect("invalid current dir");
-                curdir.join(path)
-            };
-
-            let file_name = path.file_name().unwrap().to_str().unwrap();
-
-            let path = path.as_os_str().to_str().unwrap();
-
-            println!("DLL path = {path}");
-            println!(
-                "Do not forget to put {file_name} in C:\\Program Files (x86)\\Citrix\\ICA Client\\ !!!!!!"
-            );
-
-            svc::register(path, file_name);
         }
-        (Operation::Unregister, Mode::Svc) => svc::unregister(),
+        Operation::Unregister { .. } => match args.mode {
+            Mode::Dvc => dvc::unregister(),
+            Mode::Svc => svc::unregister(),
+            Mode::Sangfor => unreachable!(),
+        },
+        Operation::Status => {
+            eprintln!("status is only supported by the sangfor mode");
+        }
     }
 }

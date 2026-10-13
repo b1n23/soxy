@@ -1,0 +1,113 @@
+name: Sangfor VDI
+
+# Builds only what the Sangfor VDI client support needs, and only for Windows:
+#
+#   * the `frontend` library for the Windows GNU targets, with the `sangfor`
+#     feature enabled, so that it exports the `svc_plugin_init` and
+#     `dvc_plugin_init` entry points the client resolves;
+#   * `soxyreg` for the same targets, since it is what registers and restores
+#     the frontend inside the client.
+#
+# The Sangfor VDI client is a 32 bits Windows application, so no Linux, no
+# macOS, no backend, no standalone and no Win7 target is built here. See the
+# `Sangfor VDI` section of the README for the details.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+  # Export the Sangfor VDI client plugin entry points.
+  SANGFOR: "1"
+
+  # Restrict the build to the Sangfor VDI client: Windows only.
+  TARGETS_FRONTEND: i686-pc-windows-gnu x86_64-pc-windows-gnu
+  TARGETS_BACKEND: ""
+  TARGETS_STANDALONE: ""
+  TARGETS_SOXYREG: i686-pc-windows-gnu x86_64-pc-windows-gnu
+
+jobs:
+  build:
+    name: Build for Sangfor VDI (Windows)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Dependencies
+        run: |
+          sudo apt update
+          sudo apt full-upgrade
+          sudo apt install gcc-multilib libc-dev clang mingw-w64
+
+      - name: Rustup update
+        run: rustup update
+
+      - name: Setup
+        run: make setup
+
+      # Lint the Sangfor VDI code with the same pedantic and nursery rules the
+      # other workflows use.
+      - name: Run clippy
+        run: make clippy
+
+      - name: Build debug and release
+        run: make debug release
+
+      # The client loads the plugin DLLs of its hardcoded table and resolves
+      # one of these two entry points in them: a DLL which does not export
+      # them is loaded but never called, which is a silent failure.
+      - name: Check the exported Sangfor plugin entry points
+        run: |
+          python3 - <<'EOF'
+          import struct
+
+          def exports(path):
+              d = open(path, "rb").read()
+              pe = struct.unpack_from("<I", d, 0x3C)[0]
+              opt = pe + 24
+              plus = struct.unpack_from("<H", d, opt)[0] == 0x20B
+              rva = struct.unpack_from("<I", d, opt + (112 if plus else 96))[0]
+              first = opt + struct.unpack_from("<H", d, pe + 20)[0]
+              sections = []
+              for i in range(struct.unpack_from("<H", d, pe + 6)[0]):
+                  s = first + i * 40
+                  va = struct.unpack_from("<I", d, s + 12)[0]
+                  sz = max(struct.unpack_from("<I", d, s + 8)[0],
+                           struct.unpack_from("<I", d, s + 16)[0])
+                  sections.append((va, sz, struct.unpack_from("<I", d, s + 20)[0]))
+              offset = lambda r: next(
+                  (raw + r - va for va, sz, raw in sections if va <= r < va + sz), None)
+              directory = offset(rva)
+              names = struct.unpack_from("<I", d, directory + 32)[0]
+              return {
+                  d[offset(struct.unpack_from("<I", d, offset(names) + i * 4)[0]):]
+                      .split(b"\0")[0].decode()
+                  for i in range(struct.unpack_from("<I", d, directory + 24)[0])
+              }
+
+          for triple in ("i686-pc-windows-gnu", "x86_64-pc-windows-gnu"):
+              found = exports(f"release/frontend/{triple}/soxy.dll")
+              print(f"{triple}: {sorted(found)}")
+              assert {"svc_plugin_init", "dvc_plugin_init"} <= found, found
+          EOF
+
+      - name: Gather artifacts
+        run: |
+          mkdir -p artifacts
+          cp -R debug release artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: sangfor
+          path: artifacts
+          retention-days: 0
