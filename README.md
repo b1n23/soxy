@@ -34,11 +34,11 @@ as [SocksOverRDP](https://github.com/nccgroup/SocksOverRDP),
 soxy supports native Windows RDP (real or virtual host) as well as VMware
 Horizon, Citrix virtual machines and XRDP.
 
-Sangfor VDI clients are supported too, but with two caveats: their RDP channel
+Sangfor VDI clients are partially supported, with caveats: their RDP channel
 plugins are listed in a hardcoded table inside the client binaries, so the
-registration step patches one entry of that table on disk, and the client
-verifies the Authenticode signature of the files it loads (see
-[Sangfor VDI](#sangfor-vdi)).
+registration step patches one entry of that table on disk, the client verifies
+the Authenticode signature of the files it loads, and its remote desktop
+session speaks SPICE rather than RDP (see [Sangfor VDI](#sangfor-vdi)).
 
 On the client side, soxy works as a plugin on:
 
@@ -431,7 +431,8 @@ restored with `soxyreg sangfor unregister` afterwards; see
 [Sangfor VDI](#sangfor-vdi) for the details and the limitations.
 
 ```bash
-soxyreg.exe sangfor register soxy.dll
+# restrict the patch to a single binary to keep the signature of the others
+soxyreg.exe sangfor register soxy.dll --only libsrapc2.dll
 ```
 
 The **32 bits** version of `soxy.dll` (from `i686-pc-windows-gnu`) must be used,
@@ -725,6 +726,23 @@ By default the least useful plugin of each binary is replaced
 (`rvlprinter.dll` in `RVLSession.exe`, `librdpsnd.dll` in `libsrapc*.dll`);
 `--victim` allows to pick another one.
 
+`--only` restricts the whole registration to a single binary, so that the
+Authenticode signature of the others is left intact. It is the recommended way
+to experiment, because the client refuses to create a session process whose
+signature it cannot verify:
+
+```bash
+# patch `libsrapc2.dll` only, leaving `RVLSession.exe` untouched
+soxyreg.exe sangfor register soxy.dll --only libsrapc2.dll
+
+# restore that single binary
+soxyreg.exe sangfor unregister --only libsrapc2.dll
+```
+
+The name must be one of the binaries listed by `soxyreg sangfor status`. When
+the restricted binary turns out not to embed the plugin table, nothing is
+patched and an error is reported.
+
 ### Plugin entry point
 
 The entry points are named `svc_plugin_init` (static virtual channels) and
@@ -762,15 +780,38 @@ and to recover the meaning of the arguments.
 
 - **Only the 32 bits client is handled**, and only the binaries shipped in
   `RemoteAppClient`.
-- **The client verifies the Authenticode signature of the files it loads.**
-  Every Sangfor binary which loads another module imports `WinVerifyTrustEx`,
-  `CryptQueryObject`, `CryptCreateHash` and `CreateToolhelp32Snapshot`, and
-  contains the strings *"Loading failed. Please check if the signature of file
-  (%s) is valid."*. `RVLSession.exe`, `SfRemoteAppClient.exe`,
-  `SangforGNavBar.exe`, `libsrapc.dll`, `libsrapc2.dll` and `SangforCSClient.exe`
-  all do. Whether the check is enforced or only reported to the user has not
-  been determined yet, but a patched binary does break its signature:
-  `soxyreg sangfor unregister` restores it.
+- **The client verifies the Authenticode signature of the files it loads, and
+  the check is enforced.** This has been confirmed at runtime: a patched
+  `RVLSession.exe` makes the client abort the session with *"Creation failed.
+  Please check if the signature of file (…\\RVLSession.exe) is valid."*.
+
+  The check does not stop at the validity of the signature: `SangforCSClient.exe`
+  embeds a table of fixed size (260 bytes) records holding the expected signer
+  names,
+
+  ```
+  Sangfor Technologies Inc. | Sangfor Technologies | Sinfor Technologies |
+  Feitian Technologies
+  ```
+
+  together with the `WinVerifyTrustEx`, `CryptQueryObject` and
+  `CertFindCertificateInStore` imports, while `RVLSession.exe` additionally
+  imports `CertGetNameStringW` to read the subject name of the certificate.
+  Re-signing a patched binary with another certificate therefore does not help.
+  Use `--only` to keep the signature of a binary intact, or restore the original
+  ones with `soxyreg sangfor unregister`.
+- **The remote desktop session does not use RDP at all.** `RVLSession.exe` is a
+  **SPICE** client: it contains the whole `RedClient` / `RedChannel` /
+  `DisplayChannel` / `CursorChannel` / `InputsChannel` / `PlaybackChannel` /
+  `RecordChannel` class hierarchy, the `red_channel.cpp`, `display_channel.cpp`,
+  ... source paths, the `SPICE_COMMON_CAP_ENC_SPICE` capability and the
+  `sgax_plugin_*` interface (2090 SPICE symbols against 7 RDP leftovers). soxy
+  is an RDP virtual channel tool, so it has no attachment point on that session.
+
+  The published applications (`SRAPSession.exe`, `SRAPSession2.exe`) do use RDP,
+  through the `FreeRDP` fork of `libngs.dll` / `libngs2.dll`. That is the only
+  path where an RDP channel plugin could be loaded, and `--only libsrapc2.dll`
+  is the way to try it.
 - The patched plugin feature (e.g. virtual printing) is lost for as long as
   soxy is registered.
 
@@ -817,6 +858,20 @@ soxyreg.exe sangfor unregister
 `rvlprinter.dll`，`libsrapc*.dll` 中是 `librdpsnd.dll`）；用 `--victim` 可以
 换成其他插件。
 
+`--only` 把整个注册过程限制在单个二进制上，从而保持其他文件的 Authenticode
+签名不变。这是推荐的试验方式，因为客户端拒绝为签名无法验证的文件创建会话进程：
+
+```bash
+# 只 patch libsrapc2.dll，完全不动 RVLSession.exe
+soxyreg.exe sangfor register soxy.dll --only libsrapc2.dll
+
+# 只还原这一个文件
+soxyreg.exe sangfor unregister --only libsrapc2.dll
+```
+
+文件名必须是 `soxyreg sangfor status` 列出的那些之一。如果指定的二进制本身
+不含插件表，则不会修改任何文件并报错退出。
+
 #### 插件入口
 
 入口名不是 FreeRDP 标准的 `VirtualChannelEntry` / `DVCPluginEntry`，而是
@@ -848,14 +903,32 @@ dump 到 `%TEMP%\soxy-sangfor-probe.log` 并返回失败。用这个版本连接
 
 - 只处理 **32 位**客户端，且只处理 `RemoteAppClient` 目录下随客户端分发的那些
   二进制文件。
-- **客户端会校验它加载的文件 Authenticode 签名。** 所有会加载其他模块的深信服
-  二进制都导入了 `WinVerifyTrustEx`、`CryptQueryObject`、`CryptCreateHash` 和
-  `CreateToolhelp32Snapshot`，并包含 *"Loading failed. Please check if the
-  signature of file (%s) is valid."* 字符串；`RVLSession.exe`、
-  `SfRemoteAppClient.exe`、`SangforGNavBar.exe`、`libsrapc.dll`、
-  `libsrapc2.dll` 和 `SangforCSClient.exe` 均有。该校验是强制拒绝还是仅提示用户
-  尚未确定，但被改写的文件签名确实已失效——用
-  `soxyreg sangfor unregister` 还原即可。
+- **客户端会校验它加载文件的 Authenticode 签名，且该校验是强制的。** 这已经过
+  运行时确认：`RVLSession.exe` 被改写后，客户端会中断会话并提示
+  *"创建失败，请检查（…\\RVLSession.exe）文件的签名是否合法"*。
+
+  而且校验并不满足于"签名有效"：`SangforCSClient.exe` 内嵌了一张定长 260 字节
+  的签名者名称表——
+
+  ```
+  Sangfor Technologies Inc. | Sangfor Technologies | Sinfor Technologies |
+  Feitian Technologies
+  ```
+
+  并导入 `WinVerifyTrustEx`、`CryptQueryObject`、`CertFindCertificateInStore`；
+  `RVLSession.exe` 还额外导入 `CertGetNameStringW` 用于读取证书使用者名。因此
+  用自己的证书给改写后的文件重新签名同样无效。请用 `--only` 保持其他文件签名
+  完好，或用 `soxyreg sangfor unregister` 还原。
+- **远程桌面会话根本不用 RDP。** `RVLSession.exe` 是一个 **SPICE** 客户端：内含
+  完整的 `RedClient` / `RedChannel` / `DisplayChannel` / `CursorChannel` /
+  `InputsChannel` / `PlaybackChannel` / `RecordChannel` 类体系、
+  `red_channel.cpp` 等源码路径、`SPICE_COMMON_CAP_ENC_SPICE` 能力标志和
+  `sgax_plugin_*` 接口（2090 处 SPICE 符号，仅 7 处 RDP 残留）。soxy 是 RDP
+  虚拟通道工具，在桌面会话上没有任何挂接点。
+
+  发布的应用（`SRAPSession.exe` / `SRAPSession2.exe`）走的是 RDP，经由
+  `libngs.dll` / `libngs2.dll` 里的 FreeRDP 分支。那是唯一可能加载 RDP 通道插件
+  的路径，`--only libsrapc2.dll` 就是尝试它的方式。
 - 在 soxy 注册期间，被替换掉的那个插件功能（例如虚拟打印）会失效。
 
 ## 🚧 Contributing

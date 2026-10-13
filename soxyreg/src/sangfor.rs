@@ -396,16 +396,42 @@ fn read_binary(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
 
-fn client_paths(root: &Path) -> Vec<PathBuf> {
-    CLIENT_BINARIES
+/// Returns the client binaries to inspect, restricted to `only` when given.
+///
+/// Restricting the operation to a single binary is useful when the signature of
+/// the others must not be broken: the Sangfor VDI client verifies the
+/// Authenticode signature of the files it loads, so a binary which is not
+/// required can be left untouched.
+fn client_paths(root: &Path, only: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    if let Some(only) = only {
+        if !CLIENT_BINARIES.contains(&only) {
+            return Err(format!(
+                "unknown Sangfor client binary {only}; expected one of {}",
+                CLIENT_BINARIES.join(", ")
+            ));
+        }
+
+        let path = root.join(only);
+
+        if !path.is_file() {
+            return Err(format!("{} is not a file", path.display()));
+        }
+
+        return Ok(vec![path]);
+    }
+
+    Ok(CLIENT_BINARIES
         .iter()
         .map(|name| root.join(name))
         .filter(|path| path.is_file())
-        .collect()
+        .collect())
 }
 
 /// Registers the soxy frontend DLL inside the Sangfor VDI client.
-pub fn register(dll: &str, victim: Option<&str>, dry_run: bool) {
+///
+/// `only` restricts the operation to a single binary of [`CLIENT_BINARIES`],
+/// which is the way to keep the Authenticode signature of the others intact.
+pub fn register(dll: &str, victim: Option<&str>, only: Option<&str>, dry_run: bool) {
     println!("Sangfor VDI client registration");
 
     let root = match install_root() {
@@ -418,17 +444,27 @@ pub fn register(dll: &str, victim: Option<&str>, dry_run: bool) {
 
     println!("client directory = {}", root.display());
 
-    let dll = PathBuf::from(dll);
-
-    if !dll.is_file() {
-        eprintln!("error: {} is not a file", dll.display());
-        return;
-    }
-
     if let Some(victim) = victim
         && let Err(e) = check_victim(victim)
     {
         eprintln!("error: {e}");
+        return;
+    }
+
+    // Resolved before the DLL is installed, so that an invalid value does not
+    // leave anything behind.
+    let paths = match client_paths(&root, only) {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    let dll = PathBuf::from(dll);
+
+    if !dll.is_file() {
+        eprintln!("error: {} is not a file", dll.display());
         return;
     }
 
@@ -448,10 +484,10 @@ pub fn register(dll: &str, victim: Option<&str>, dry_run: bool) {
 
     let mut patched = 0;
 
-    for path in client_paths(&root) {
+    for path in &paths {
         println!("inspecting {}", path.display());
 
-        let data = match read_binary(&path) {
+        let data = match read_binary(path) {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("  error: {e}");
@@ -477,7 +513,7 @@ pub fn register(dll: &str, victim: Option<&str>, dry_run: bool) {
 
         println!("  replacing {victim_name:?} by {dll_name:?}");
 
-        if let Err(e) = write_slot(&path, &slot, &dll_name, dry_run) {
+        if let Err(e) = write_slot(path, &slot, &dll_name, dry_run) {
             eprintln!("  error: {e}");
             continue;
         }
@@ -499,7 +535,10 @@ pub fn register(dll: &str, victim: Option<&str>, dry_run: bool) {
 }
 
 /// Unregisters the soxy frontend DLL from the Sangfor VDI client.
-pub fn unregister(dry_run: bool) {
+///
+/// `only` restricts the restoration to a single binary of [`CLIENT_BINARIES`],
+/// mirroring the option of [`register`].
+pub fn unregister(only: Option<&str>, dry_run: bool) {
     println!("Sangfor VDI client unregistration");
 
     let root = match install_root() {
@@ -512,16 +551,24 @@ pub fn unregister(dry_run: bool) {
 
     println!("client directory = {}", root.display());
 
+    let paths = match client_paths(&root, only) {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
     let mut restored = 0;
 
-    for path in client_paths(&root) {
-        if !backup_path(&path).exists() {
+    for path in &paths {
+        if !backup_path(path).exists() {
             continue;
         }
 
         println!("restoring {}", path.display());
 
-        match restore(&path, dry_run) {
+        match restore(path, dry_run) {
             Ok(true) => restored += 1,
             Ok(false) => (),
             Err(e) => eprintln!("  error: {e}"),
@@ -551,9 +598,17 @@ pub fn status() {
 
     println!("client directory = {}", root.display());
 
-    for path in client_paths(&root) {
-        let patched = backup_path(&path).exists();
-        let data = match read_binary(&path) {
+    let paths = match client_paths(&root, None) {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    for path in &paths {
+        let patched = backup_path(path).exists();
+        let data = match read_binary(path) {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("{}: error: {e}", path.display());
@@ -662,6 +717,24 @@ mod tests {
     fn check_victim_rejects_unknown_plugins() {
         assert!(check_victim("rvlprinter.dll").is_ok());
         assert!(check_victim("soxy.dll").is_err());
+    }
+
+    #[test]
+    fn client_paths_rejects_unknown_binaries() {
+        let root = Path::new(r"C:\client");
+
+        let error = client_paths(root, Some("soxy.dll")).unwrap_err();
+        assert!(error.contains("unknown Sangfor client binary"), "{error}");
+    }
+
+    #[test]
+    fn client_paths_keeps_a_known_binary_which_is_missing() {
+        // a file which is not installed must be reported, not silently skipped,
+        // otherwise the caller would patch nothing without knowing why
+        let root = Path::new(r"C:\does\not\exist");
+
+        let error = client_paths(root, Some("libsrapc2.dll")).unwrap_err();
+        assert!(error.contains("is not a file"), "{error}");
     }
 
     #[test]

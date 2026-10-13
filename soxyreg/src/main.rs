@@ -29,11 +29,18 @@ enum Operation {
         /// Sangfor mode only: hardcoded channel plugin entry to replace.
         #[arg(long)]
         victim: Option<String>,
+        /// Sangfor mode only: restrict the registration to a single client
+        /// binary, leaving the Authenticode signature of the others intact.
+        #[arg(long)]
+        only: Option<String>,
         /// Sangfor mode only: report actions without modifying any file.
         #[arg(long)]
         dry_run: bool,
     },
     Unregister {
+        /// Sangfor mode only: restrict the restoration to a single client binary.
+        #[arg(long)]
+        only: Option<String>,
         /// Sangfor mode only: report actions without modifying any file.
         #[arg(long)]
         dry_run: bool,
@@ -73,9 +80,12 @@ fn main() {
             Operation::Register {
                 dll,
                 victim,
+                only,
                 dry_run,
-            } => sangfor::register(&dll, victim.as_deref(), dry_run),
-            Operation::Unregister { dry_run } => sangfor::unregister(dry_run),
+            } => sangfor::register(&dll, victim.as_deref(), only.as_deref(), dry_run),
+            Operation::Unregister { only, dry_run } => {
+                sangfor::unregister(only.as_deref(), dry_run);
+            }
             Operation::Status => sangfor::status(),
         }
 
