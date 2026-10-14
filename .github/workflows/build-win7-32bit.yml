@@ -6,12 +6,26 @@ name: Build backend for Windows 7 32-bit
 # library for it, so a dedicated rustc has to be built from sources (see the
 # `win7-rustc` directory and the `make win7-32bit` target). The resulting
 # compiler is cached between runs to keep the job reasonably fast.
+#
+# The `debug` profile is the default when the workflow is triggered by hand: it
+# enables the `log` feature and logs at `Level::Debug`, which is what you need
+# to understand why soxy does not talk to the VDI (the `release` profile strips
+# the logs away and exits silently). A `v*` tag still produces the `release`
+# build, so the automation of the previous behaviour is preserved.
 
 on:
   push:
     tags: [ 'v*' ]
   workflow_dispatch:
     inputs:
+      profile:
+        description: 'Cargo profile to build'
+        required: false
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
       services:
         description: 'Space separated list of services to embed'
         required: false
@@ -29,6 +43,9 @@ env:
   SUFFIX: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
   # Target triple of the produced artifacts.
   TARGET: i686-win7-windows-gnu
+  # Cargo profile: `debug` (logs kept, use it to diagnose) when dispatched by
+  # hand, `release` on the `v*` tags.
+  PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'release' }}
 
 jobs:
   build-win7-32bit:
@@ -93,16 +110,16 @@ jobs:
           make -C win7-rustc register-toolchain \
             TOOLCHAIN=${{ env.TOOLCHAIN_WIN7_BACKEND }}
 
-      - name: Build Win7 32-bit backend
+      - name: Build Win7 32-bit backend (${{ env.PROFILE }})
         run: |
-          make win7-32bit \
+          make win7-32bit-${{ env.PROFILE }} \
             SERVICES="${{ inputs.services || 'clipboard command forward ftp input socks5 stage0' }}" \
             VC="${{ inputs.vc || 'dvc svc' }}"
 
       - name: Gather artifacts
         run: |
-          mkdir -p artifacts/release/backend
-          cp -R release/backend/${{ env.TARGET }} artifacts/release/backend/
+          mkdir -p artifacts/${{ env.PROFILE }}/backend
+          cp -R ${{ env.PROFILE }}/backend/${{ env.TARGET }} artifacts/${{ env.PROFILE }}/backend/
           ( cd artifacts && find . -type f ! -name SHA256SUMS.txt -print0 \
               | sort -z | xargs -0 sha256sum > SHA256SUMS.txt )
           cat artifacts/SHA256SUMS.txt
@@ -110,7 +127,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: win7-32bit-${{ env.SUFFIX }}
+          name: win7-32bit-${{ env.PROFILE }}-${{ env.SUFFIX }}
           path: artifacts
           retention-days: 90
           if-no-files-found: error
