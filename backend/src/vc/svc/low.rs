@@ -85,6 +85,8 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
         }
         common::trace!("duplicated filehandle = {dfilehandle:?}");
 
+        common::debug!("SVC(low) handle ready");
+
         let read_overlapped = cell::RefCell::new(create_io_overlapped()?);
         let write_overlapped = cell::RefCell::new(create_io_overlapped()?);
 
