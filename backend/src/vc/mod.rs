@@ -48,6 +48,47 @@ type VirtualChannelWrite = unsafe extern "system" fn(
 type VirtualChannelClose =
     unsafe extern "system" fn(hchannelhandle: ws::Win32::Foundation::HANDLE) -> ws::core::BOOL;
 
+// VMware's `vdp_rdpvcbridge.dll` exports `VDP_VirtualChannel*` as plain C++
+// functions, hence `__cdecl`: the *caller* cleans the stack. Citrix's `WFAPI`
+// and the WTS ones are `WINAPI`, i.e. `__stdcall`: the *callee* cleans it.
+//
+// Mixing the two up does not break the call itself: the arguments are pushed
+// the same way and the return value comes back in `%eax`. What breaks is
+// `%esp`, which ends up off by the size of the arguments. rustc keeps a frame
+// pointer on `i686-pc-windows-gnu`, so the code following the call keeps
+// working (locals are addressed through `%ebp`) and the crash only shows up
+// later. The epilogue is a bare `pop %ebp; ret` with no `mov %esp, %ebp`
+// beforehand, so the saved frame pointer and the return address are then read
+// from the wrong place and the process dies with an access violation exactly
+// as `open()` returns.
+#[cfg(feature = "svc")]
+type VirtualChannelOpenCdecl = unsafe extern "C" fn(
+    hserver: ws::Win32::Foundation::HANDLE,
+    sessionid: os::raw::c_uint,
+    pvirtualname: *mut os::raw::c_char,
+) -> ws::Win32::Foundation::HANDLE;
+
+#[cfg(feature = "svc")]
+type VirtualChannelReadCdecl = unsafe extern "C" fn(
+    hchannelhandle: ws::Win32::Foundation::HANDLE,
+    timeout: os::raw::c_ulong,
+    buffer: *mut os::raw::c_uchar,
+    buffersize: os::raw::c_ulong,
+    pbytesread: *mut os::raw::c_ulong,
+) -> ws::core::BOOL;
+
+#[cfg(feature = "svc")]
+type VirtualChannelWriteCdecl = unsafe extern "C" fn(
+    hchannelhandle: ws::Win32::Foundation::HANDLE,
+    buffer: *const os::raw::c_uchar,
+    length: os::raw::c_ulong,
+    pbyteswritten: *mut os::raw::c_ulong,
+) -> ws::core::BOOL;
+
+#[cfg(feature = "svc")]
+type VirtualChannelCloseCdecl =
+    unsafe extern "C" fn(hchannelhandle: ws::Win32::Foundation::HANDLE) -> ws::core::BOOL;
+
 pub enum Error {
     NoLibraryFound,
     LibraryLoading(libloading::Error),

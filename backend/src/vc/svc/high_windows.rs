@@ -2,11 +2,31 @@ use crate::vc;
 use std::{ffi, io, ops, os, thread};
 use windows_sys as ws;
 
+/// Symbols of a "high" static virtual channel implementation.
+///
+/// The two variants carry the same functions and only differ by their calling
+/// convention: `WFVirtualChannel*` is declared `WFAPI` (i.e. `__stdcall`, the
+/// callee cleans the stack) while `VDP_VirtualChannel*` is a plain C export
+/// (i.e. `__cdecl`, the caller cleans it). See the note on the `...Cdecl` types
+/// in `crate::vc` for why confusing the two is fatal on `i686-pc-windows-gnu`.
+#[derive(Clone)]
+enum Syms<'a> {
+    Stdcall {
+        open: libloading::Symbol<'a, vc::VirtualChannelOpen>,
+        read: libloading::Symbol<'a, vc::VirtualChannelRead>,
+        write: libloading::Symbol<'a, vc::VirtualChannelWrite>,
+        close: libloading::Symbol<'a, vc::VirtualChannelClose>,
+    },
+    Cdecl {
+        open: libloading::Symbol<'a, vc::VirtualChannelOpenCdecl>,
+        read: libloading::Symbol<'a, vc::VirtualChannelReadCdecl>,
+        write: libloading::Symbol<'a, vc::VirtualChannelWriteCdecl>,
+        close: libloading::Symbol<'a, vc::VirtualChannelCloseCdecl>,
+    },
+}
+
 pub struct Svc<'a> {
-    open: libloading::Symbol<'a, vc::VirtualChannelOpen>,
-    read: libloading::Symbol<'a, vc::VirtualChannelRead>,
-    write: libloading::Symbol<'a, vc::VirtualChannelWrite>,
-    close: libloading::Symbol<'a, vc::VirtualChannelClose>,
+    syms: Syms<'a>,
 }
 
 impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
@@ -16,19 +36,23 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
         if let Some(citrix) = libs.citrix() {
             unsafe {
                 Ok(Self {
-                    open: citrix.get(b"WFVirtualChannelOpen")?,
-                    read: citrix.get(b"WFVirtualChannelRead")?,
-                    write: citrix.get(b"WFVirtualChannelWrite")?,
-                    close: citrix.get(b"WFVirtualChannelClose")?,
+                    syms: Syms::Stdcall {
+                        open: citrix.get(b"WFVirtualChannelOpen")?,
+                        read: citrix.get(b"WFVirtualChannelRead")?,
+                        write: citrix.get(b"WFVirtualChannelWrite")?,
+                        close: citrix.get(b"WFVirtualChannelClose")?,
+                    },
                 })
             }
         } else if let Some(horizon) = libs.horizon() {
             unsafe {
                 Ok(Self {
-                    open: horizon.get(b"VDP_VirtualChannelOpen")?,
-                    read: horizon.get(b"VDP_VirtualChannelRead")?,
-                    write: horizon.get(b"VDP_VirtualChannelWrite")?,
-                    close: horizon.get(b"VDP_VirtualChannelClose")?,
+                    syms: Syms::Cdecl {
+                        open: horizon.get(b"VDP_VirtualChannelOpen")?,
+                        read: horizon.get(b"VDP_VirtualChannelRead")?,
+                        write: horizon.get(b"VDP_VirtualChannelWrite")?,
+                        close: horizon.get(b"VDP_VirtualChannelClose")?,
+                    },
                 })
             }
         } else {
@@ -39,7 +63,7 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
     fn open(&self, name: [ffi::c_char; 8]) -> Result<Self::Handle, vc::Error> {
         common::debug!("trying to open SVC(high)");
 
-        // The channel name is handed over as a *mut* buffer, and the RDP virtual
+        // The channel name is handed over as a *mut buffer, and the RDP virtual
         // channel APIs treat it as a fixed 8 bytes field which is not required to
         // be NUL terminated (VMware rewrites it its own way). The display name
         // must therefore be computed *before* the call: reading the buffer back
@@ -52,20 +76,24 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
         #[cfg(not(feature = "log"))]
         let display_name: Option<String> = None;
 
-        // The channel name is handed over as a *mut* buffer, and some
-        // implementations write back into it. A `[c_char; 8]` living on the
-        // stack is an easy target for such a write, and the resulting stack
-        // corruption typically only shows up once the call has returned.
-        // Give the library room on the heap instead.
+        // The channel name is handed over as a *mut buffer: give the library
+        // room on the heap rather than a `[c_char; 8]` sitting on the stack.
         let mut name_buf = vec![0i8; name.len() + 248];
         name_buf[..name.len()].copy_from_slice(&name);
 
         let wtshandle = unsafe {
-            (self.open)(
-                ws::Win32::System::RemoteDesktop::WTS_CURRENT_SERVER_HANDLE,
-                ws::Win32::System::RemoteDesktop::WTS_CURRENT_SESSION,
-                name_buf.as_mut_ptr(),
-            )
+            match &self.syms {
+                Syms::Stdcall { open, .. } => (open)(
+                    ws::Win32::System::RemoteDesktop::WTS_CURRENT_SERVER_HANDLE,
+                    ws::Win32::System::RemoteDesktop::WTS_CURRENT_SESSION,
+                    name_buf.as_mut_ptr(),
+                ),
+                Syms::Cdecl { open, .. } => (open)(
+                    ws::Win32::System::RemoteDesktop::WTS_CURRENT_SERVER_HANDLE,
+                    ws::Win32::System::RemoteDesktop::WTS_CURRENT_SESSION,
+                    name_buf.as_mut_ptr(),
+                ),
+            }
         };
 
         // Logged at debug level on purpose: when the underlying library crashes
@@ -92,9 +120,7 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
             name: display_name,
             wtshandle,
             name_buf,
-            read: self.read.clone(),
-            write: self.write.clone(),
-            close: self.close.clone(),
+            syms: self.syms.clone(),
         };
 
         common::debug!("SVC(high) handle constructed, returning");
@@ -107,16 +133,11 @@ pub struct Handle<'a> {
     name: Option<String>,
     wtshandle: ws::Win32::Foundation::HANDLE,
     // The channel name is handed over to the underlying library as a *mut
-    // buffer, and VMware's implementation keeps that pointer around (it is the
-    // only mutable argument of `VDP_VirtualChannelOpen`). The buffer must
-    // therefore outlive the handle, otherwise the library is left holding a
-    // dangling pointer and the process dies with an access violation as soon as
-    // `open()` unwinds.
+    // buffer, and VMware's implementation keeps that pointer around. The buffer
+    // must therefore outlive the handle.
     #[allow(dead_code)]
     name_buf: Vec<i8>,
-    read: libloading::Symbol<'a, vc::VirtualChannelRead>,
-    write: libloading::Symbol<'a, vc::VirtualChannelWrite>,
-    close: libloading::Symbol<'a, vc::VirtualChannelClose>,
+    syms: Syms<'a>,
 }
 
 // Because of the *mut content (handle) Rust does not derive Send and
@@ -140,13 +161,22 @@ impl vc::Handle for Handle<'_> {
         let mut read = 0;
 
         let ret = unsafe {
-            (self.read)(
-                self.wtshandle,
-                timeout,
-                data.as_mut_ptr(),
-                to_read,
-                &raw mut read,
-            )
+            match &self.syms {
+                Syms::Stdcall { read: read_fn, .. } => (read_fn)(
+                    self.wtshandle,
+                    timeout,
+                    data.as_mut_ptr(),
+                    to_read,
+                    &raw mut read,
+                ),
+                Syms::Cdecl { read: read_fn, .. } => (read_fn)(
+                    self.wtshandle,
+                    timeout,
+                    data.as_mut_ptr(),
+                    to_read,
+                    &raw mut read,
+                ),
+            }
         };
 
         if ret == ws::Win32::Foundation::FALSE {
@@ -161,14 +191,21 @@ impl vc::Handle for Handle<'_> {
     fn write(&self, data: &[u8]) -> Result<usize, vc::Error> {
         let to_write = os::raw::c_ulong::try_from(data.len())
             .map_err(|e| vc::Error::WriteFailed(e.to_string()))?;
-
         let mut written = 0;
 
         common::trace!("write {to_write} bytes");
 
         loop {
-            let ret =
-                unsafe { (self.write)(self.wtshandle, data.as_ptr(), to_write, &raw mut written) };
+            let ret = unsafe {
+                match &self.syms {
+                    Syms::Stdcall { write, .. } => {
+                        (write)(self.wtshandle, data.as_ptr(), to_write, &raw mut written)
+                    }
+                    Syms::Cdecl { write, .. } => {
+                        (write)(self.wtshandle, data.as_ptr(), to_write, &raw mut written)
+                    }
+                }
+            };
 
             if ret == ws::Win32::Foundation::FALSE || written != to_write {
                 if written == 0 {
@@ -188,7 +225,12 @@ impl vc::Handle for Handle<'_> {
     }
 
     fn close(self) -> Result<(), vc::Error> {
-        let ret = unsafe { (self.close)(self.wtshandle) };
+        let ret = unsafe {
+            match &self.syms {
+                Syms::Stdcall { close, .. } => (close)(self.wtshandle),
+                Syms::Cdecl { close, .. } => (close)(self.wtshandle),
+            }
+        };
         if ret == ws::Win32::Foundation::FALSE {
             let err = io::Error::last_os_error();
             Err(vc::Error::CloseChannelFailed(err.to_string()))
