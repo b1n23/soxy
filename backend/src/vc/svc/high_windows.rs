@@ -39,6 +39,19 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
     fn open(&self, name: [ffi::c_char; 8]) -> Result<Self::Handle, vc::Error> {
         common::debug!("trying to open SVC(high)");
 
+        // The channel name is handed over as a *mut* buffer, and the RDP virtual
+        // channel APIs treat it as a fixed 8 bytes field which is not required to
+        // be NUL terminated (VMware rewrites it its own way). The display name
+        // must therefore be computed *before* the call: reading the buffer back
+        // afterwards with `CStr::from_ptr` walks past the end of the array.
+        #[cfg(feature = "log")]
+        let display_name = unsafe { ffi::CStr::from_ptr(name.as_ptr()) }
+            .to_str()
+            .ok()
+            .map(|n| format!("SVC(high) {n:?}"));
+        #[cfg(not(feature = "log"))]
+        let display_name: Option<String> = None;
+
         let wtshandle = unsafe {
             (self.open)(
                 ws::Win32::System::RemoteDesktop::WTS_CURRENT_SERVER_HANDLE,
@@ -65,16 +78,8 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
         // (unlike the low one, which needs `WTSVirtualFileHandle` to duplicate
         // the handle), the query is simply dropped.
 
-        #[cfg(not(feature = "log"))]
-        let name = None;
-
-        #[cfg(feature = "log")]
-        let name = Some(format!("SVC(high) {:?}", unsafe {
-            ffi::CStr::from_ptr(name.as_ptr())
-        }));
-
         Ok(Handle {
-            name,
+            name: display_name,
             wtshandle,
             read: self.read.clone(),
             write: self.write.clone(),
