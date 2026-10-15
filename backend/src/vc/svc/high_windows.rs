@@ -91,6 +91,7 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
         Ok(Handle {
             name: display_name,
             wtshandle,
+            name_buf,
             read: self.read.clone(),
             write: self.write.clone(),
             close: self.close.clone(),
@@ -101,6 +102,14 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
 pub struct Handle<'a> {
     name: Option<String>,
     wtshandle: ws::Win32::Foundation::HANDLE,
+    // The channel name is handed over to the underlying library as a *mut
+    // buffer, and VMware's implementation keeps that pointer around (it is the
+    // only mutable argument of `VDP_VirtualChannelOpen`). The buffer must
+    // therefore outlive the handle, otherwise the library is left holding a
+    // dangling pointer and the process dies with an access violation as soon as
+    // `open()` unwinds.
+    #[allow(dead_code)]
+    name_buf: Vec<i8>,
     read: libloading::Symbol<'a, vc::VirtualChannelRead>,
     write: libloading::Symbol<'a, vc::VirtualChannelWrite>,
     close: libloading::Symbol<'a, vc::VirtualChannelClose>,
