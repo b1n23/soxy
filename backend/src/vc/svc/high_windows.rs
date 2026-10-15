@@ -52,11 +52,19 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
         #[cfg(not(feature = "log"))]
         let display_name: Option<String> = None;
 
+        // The channel name is handed over as a *mut* buffer, and some
+        // implementations write back into it. A `[c_char; 8]` living on the
+        // stack is an easy target for such a write, and the resulting stack
+        // corruption typically only shows up once the call has returned.
+        // Give the library room on the heap instead.
+        let mut name_buf = vec![0i8; name.len() + 248];
+        name_buf[..name.len()].copy_from_slice(&name);
+
         let wtshandle = unsafe {
             (self.open)(
                 ws::Win32::System::RemoteDesktop::WTS_CURRENT_SERVER_HANDLE,
                 ws::Win32::System::RemoteDesktop::WTS_CURRENT_SESSION,
-                name.as_ptr().cast_mut(),
+                name_buf.as_mut_ptr(),
             )
         };
 
@@ -77,6 +85,8 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
         // high implementations read and write through the handle directly
         // (unlike the low one, which needs `WTSVirtualFileHandle` to duplicate
         // the handle), the query is simply dropped.
+
+        common::debug!("SVC(high) handle ready");
 
         Ok(Handle {
             name: display_name,

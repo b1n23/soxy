@@ -117,6 +117,7 @@ where
 
     let vchandle = vc.open(channel_name)?;
 
+    common::debug!("vc.open() returned");
     common::info!(
         "virtual channel {} opened",
         vchandle.display_name().unwrap_or("<unknown>")

@@ -272,6 +272,8 @@ impl<'a> VirtualChannel<'a> for GenericChannel<'a> {
             .map(GenericHandle::Dynamic)
             .inspect_err(|e| common::error!("failed to open DVC: {e}"));
 
+        common::debug!("open virtual channel done (svc ok: {}, dvc ok: {})", svc.is_ok(), dvc.is_ok());
+
         dvc.or(svc)
     }
 }
