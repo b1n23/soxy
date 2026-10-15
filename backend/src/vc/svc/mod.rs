@@ -44,10 +44,19 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
     }
 
     fn open(&self, name: [ffi::c_char; 8]) -> Result<Self::Handle, vc::Error> {
+        common::debug!("dispatching SVC open");
         match self {
-            Self::High(svc) => svc.open(name).map(Handle::High),
+            Self::High(svc) => {
+                let res = svc.open(name).map(Handle::High);
+                common::debug!("high SVC open returned (ok: {})", res.is_ok());
+                res
+            }
             #[cfg(target_os = "windows")]
-            Self::Low(svc) => svc.open(name).map(Handle::Low),
+            Self::Low(svc) => {
+                let res = svc.open(name).map(Handle::Low);
+                common::debug!("low SVC open returned (ok: {})", res.is_ok());
+                res
+            }
         }
     }
 }

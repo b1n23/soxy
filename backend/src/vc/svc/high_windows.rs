@@ -88,14 +88,18 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
 
         common::debug!("SVC(high) handle ready");
 
-        Ok(Handle {
+        let handle = Handle {
             name: display_name,
             wtshandle,
             name_buf,
             read: self.read.clone(),
             write: self.write.clone(),
             close: self.close.clone(),
-        })
+        };
+
+        common::debug!("SVC(high) handle constructed, returning");
+
+        Ok(handle)
     }
 }
 

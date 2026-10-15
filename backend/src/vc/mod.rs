@@ -261,6 +261,8 @@ impl<'a> VirtualChannel<'a> for GenericChannel<'a> {
             .map(GenericHandle::Static)
             .inspect_err(|e| common::error!("failed to open SVC: {e}"));
 
+        common::debug!("SVC attempt finished, before DVC attempt");
+
         #[cfg(not(feature = "dvc"))]
         let dvc: Result<Self::Handle, _> = Err(Error::NoLibraryFound);
         #[cfg(feature = "dvc")]
