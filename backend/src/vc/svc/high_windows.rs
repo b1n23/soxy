@@ -1,10 +1,9 @@
 use crate::vc;
-use std::{ffi, io, ops, os, ptr, thread};
+use std::{ffi, io, ops, os, thread};
 use windows_sys as ws;
 
 pub struct Svc<'a> {
     open: libloading::Symbol<'a, vc::VirtualChannelOpen>,
-    query: libloading::Symbol<'a, vc::VirtualChannelQuery>,
     read: libloading::Symbol<'a, vc::VirtualChannelRead>,
     write: libloading::Symbol<'a, vc::VirtualChannelWrite>,
     close: libloading::Symbol<'a, vc::VirtualChannelClose>,
@@ -18,7 +17,6 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
             unsafe {
                 Ok(Self {
                     open: citrix.get(b"WFVirtualChannelOpen")?,
-                    query: citrix.get(b"WFVirtualChannelQuery")?,
                     read: citrix.get(b"WFVirtualChannelRead")?,
                     write: citrix.get(b"WFVirtualChannelWrite")?,
                     close: citrix.get(b"WFVirtualChannelClose")?,
@@ -28,7 +26,6 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
             unsafe {
                 Ok(Self {
                     open: horizon.get(b"VDP_VirtualChannelOpen")?,
-                    query: horizon.get(b"VDP_VirtualChannelQuery")?,
                     read: horizon.get(b"VDP_VirtualChannelRead")?,
                     write: horizon.get(b"VDP_VirtualChannelWrite")?,
                     close: horizon.get(b"VDP_VirtualChannelClose")?,
@@ -50,28 +47,23 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
             )
         };
 
+        // Logged at debug level on purpose: when the underlying library crashes
+        // the process, this is the only way to tell how far the open call got.
+        common::debug!("SVC(high) open returned {wtshandle:?}");
+
         if wtshandle.is_null() {
             let err = io::Error::last_os_error();
             return Err(vc::Error::OpenChannelFailed(err.to_string()));
         }
 
-        let mut client_dataptr = ptr::null_mut();
-        let mut len = 0;
-
-        common::trace!("VirtualChannelQuery");
-        let ret = unsafe {
-            (self.query)(
-                wtshandle,
-                ws::Win32::System::RemoteDesktop::WTSVirtualClientData,
-                ptr::from_mut(&mut client_dataptr),
-                &raw mut len,
-            )
-        };
-
-        if ret == ws::Win32::Foundation::FALSE {
-            let err = io::Error::last_os_error();
-            common::warn!("virtual channel query failed (len = {len}, last error = {err})");
-        }
+        // NOTE: there used to be a `VirtualChannelQuery(WTSVirtualClientData)`
+        // call here, inherited from the Citrix implementation. Its result was
+        // never used (only a warning was logged on failure), but VMware's
+        // `VDP_VirtualChannelQuery` crashes the whole process when called that
+        // way, right after a successful `VDP_VirtualChannelOpen`. Since the
+        // high implementations read and write through the handle directly
+        // (unlike the low one, which needs `WTSVirtualFileHandle` to duplicate
+        // the handle), the query is simply dropped.
 
         #[cfg(not(feature = "log"))]
         let name = None;
