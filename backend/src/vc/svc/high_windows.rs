@@ -114,18 +114,12 @@ impl<'a> vc::VirtualChannel<'a> for Svc<'a> {
         // (unlike the low one, which needs `WTSVirtualFileHandle` to duplicate
         // the handle), the query is simply dropped.
 
-        common::debug!("SVC(high) handle ready");
-
-        let handle = Handle {
+        Ok(Handle {
             name: display_name,
             wtshandle,
             name_buf,
             syms: self.syms.clone(),
-        };
-
-        common::debug!("SVC(high) handle constructed, returning");
-
-        Ok(handle)
+        })
     }
 }
 
