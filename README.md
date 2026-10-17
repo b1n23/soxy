@@ -331,6 +331,10 @@ To confirm the frontend really made it in, check the log file configured in
 `(control channel) changing to OPENED state` means the plugin is loaded and the
 channel is up.
 
+See [`docs/horizon-windows.md`](docs/horizon-windows.md) for the full walkthrough
+of that setup (why the RDS AddIn route does not apply, manual registry steps,
+rollback, and the silent failure modes to watch for).
+
 ##### Configuration file on Windows
 
 soxy reads its configuration from `%APPDATA%\soxy.toml` (`dirs::config_dir()`).
